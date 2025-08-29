@@ -1,0 +1,187 @@
+name: Reusable PWA to Android Build
+
+on:
+  workflow_call:
+    inputs:
+      # Required inputs
+      app_name:
+        required: true
+        type: string
+        description: 'Application display name'
+      package_name:
+        required: true
+        type: string
+        description: 'Android package name (com.company.app)'
+      pwa_url:
+        required: true
+        type: string
+        description: 'URL where PWA is hosted'
+      
+      # Optional inputs with defaults
+      node_version:
+        required: false
+        type: string
+        default: '18'
+        description: 'Node.js version to use'
+      java_version:
+        required: false
+        type: string
+        default: '11'
+        description: 'Java version to use'
+      app_version:
+        required: false
+        type: string
+        default: '1.0.0'
+        description: 'App version'
+      build_command:
+        required: false
+        type: string
+        default: 'npm run build'
+        description: 'Command to build React app'
+      deploy_track:
+        required: false
+        type: string
+        default: 'internal'
+        description: 'Play Store track (internal, alpha, beta, production)'
+      min_sdk_version:
+        required: false
+        type: number
+        default: 21
+        description: 'Minimum Android SDK version'
+      target_sdk_version:
+        required: false
+        type: number
+        default: 33
+        description: 'Target Android SDK version'
+      enable_notifications:
+        required: false
+        type: boolean
+        default: true
+        description: 'Enable push notifications'
+      enable_location:
+        required: false
+        type: boolean
+        default: false
+        description: 'Enable location services'
+      background_color:
+        required: false
+        type: string
+        default: '#ffffff'
+        description: 'App background color'
+      theme_color:
+        required: false
+        type: string
+        default: '#000000'
+        description: 'App theme color'
+      
+    secrets:
+      KEYSTORE_BASE64:
+        required: true
+        description: 'Base64 encoded keystore file'
+      KEYSTORE_PASSWORD:
+        required: true
+        description: 'Keystore password'
+      KEY_ALIAS:
+        required: true
+        description: 'Key alias'
+      KEY_PASSWORD:
+        required: true
+        description: 'Key password'
+      SERVICE_ACCOUNT_JSON:
+        required: true
+        description: 'Google Play service account JSON'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout calling repository
+      uses: actions/checkout@v4
+
+    - name: Checkout pipeline repository
+      uses: actions/checkout@v4
+      with:
+        repository: your-org/pwa-android-pipeline
+        path: .pipeline
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node_version }}
+        cache: 'npm'
+
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: ${{ inputs.java_version }}
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Build React PWA
+      run: ${{ inputs.build_command }}
+
+    - name: Deploy PWA (if deploy script exists)
+      run: |
+        if [ -f "deploy.sh" ]; then
+          chmod +x deploy.sh
+          ./deploy.sh
+        else
+          echo "No deploy.sh found, skipping PWA deployment"
+        fi
+
+    - name: Install PWABuilder CLI
+      run: npm install -g @pwabuilder/cli
+
+    - name: Generate Android options file
+      run: |
+        cat > androidPackageOptions.json << EOF
+        {
+          "packageId": "${{ inputs.package_name }}",
+          "name": "${{ inputs.app_name }}",
+          "launcherName": "${{ inputs.app_name }}",
+          "appVersion": "${{ inputs.app_version }}",
+          "appVersionCode": ${{ github.run_number }},
+          "minSdkVersion": ${{ inputs.min_sdk_version }},
+          "targetSdkVersion": ${{ inputs.target_sdk_version }},
+          "backgroundColor": "${{ inputs.background_color }}",
+          "themeColor": "${{ inputs.theme_color }}",
+          "iconUrl": "${{ inputs.pwa_url }}/icon-512x512.png",
+          "maskableIconUrl": "${{ inputs.pwa_url }}/icon-maskable.png",
+          "enableNotifications": ${{ inputs.enable_notifications }},
+          "enableLocation": ${{ inputs.enable_location }},
+          "enableTwa": true,
+          "signingMode": "mine"
+        }
+        EOF
+
+    - name: Generate Android package
+      run: |
+        pwa package ${{ inputs.pwa_url }} \
+          --platform android \
+          --options androidPackageOptions.json
+
+    - name: Setup signing
+      run: |
+        chmod +x .pipeline/scripts/sign-apk.sh
+        .pipeline/scripts/sign-apk.sh
+      env:
+        KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+    - name: Upload to Google Play
+      uses: r0adkll/upload-google-play@v1
+      with:
+        serviceAccountJsonPlainText: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+        packageName: ${{ inputs.package_name }}
+        releaseFiles: android-package/app/build/outputs/apk/release/app-release.apk
+        track: ${{ inputs.deploy_track }}
+        status: completed
